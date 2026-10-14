@@ -1,0 +1,226 @@
+
+services:
+  # ==========================================
+  # 1. POSTGRESQL - Database quan hệ
+  # ==========================================
+  postgres:
+    image: postgres:17-alpine
+    container_name: ecommerce-mvp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # 2. MONGODB - Database NoSQL
+  # ==========================================
+  mongodb:
+    image: mongo:8
+    container_name: ecommerce-mvp-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet -u \"$${MONGO_INITDB_ROOT_USERNAME}\" -p \"$${MONGO_INITDB_ROOT_PASSWORD}\" --authenticationDatabase admin --eval \"db.adminCommand('ping').ok\""
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  # ==========================================
+  # 3. REDIS - Cache
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-mvp-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping 2>/dev/null | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================
+  # 4. KAFKA - Message Broker
+  # ==========================================
+  kafka:
+    image: apache/kafka:4.1.1
+    container_name: ecommerce-mvp-kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID}
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ==========================================
+  # 5. AUTH SERVICE - Đăng ký, đăng nhập, JWT
+  # ==========================================
+  auth-service:
+    build: ./services/auth-service
+    container_name: ecommerce-mvp-auth
+    restart: unless-stopped
+    environment:
+      PORT: 3003
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/auth_db
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "3003"
+
+  # ==========================================
+  # 6. CUSTOMER SERVICE - Quản lý khách hàng
+  # ==========================================
+  customer-service:
+    build: ./services/customer-service
+    container_name: ecommerce-mvp-customer
+    restart: unless-stopped
+    environment:
+      PORT: 3004
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/customer_db
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    expose:
+      - "3004"
+
+  # ==========================================
+  # 7. PRODUCT SERVICE - Quản lý sản phẩm
+  # ==========================================
+  product-service:
+    build: ./services/product-service
+    container_name: ecommerce-mvp-product
+    restart: unless-stopped
+    environment:
+      PORT: 3005
+      MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/product_db?authSource=admin
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    expose:
+      - "3005"
+
+  # ==========================================
+  # 8. SHIPMENT SERVICE - Quản lý giao hàng
+  # ==========================================
+  shipment-service:
+    build: ./services/shipment-service
+    container_name: ecommerce-mvp-shipment
+    restart: unless-stopped
+    environment:
+      PORT: 3006
+      MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongodb:27017/shipment_db?authSource=admin
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    expose:
+      - "3006"
+
+  # ==========================================
+  # 9. ORDER SERVICE - Quản lý đơn hàng
+  # ==========================================
+  order-service:
+    build: ./services/order-service
+    container_name: ecommerce-mvp-order
+    restart: unless-stopped
+    environment:
+      PORT: 3007
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/order_db
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "3007"
+
+  # ==========================================
+  # 10. API GATEWAY - Cổng vào hệ thống
+  # ==========================================
+  api-gateway:
+    build: ./services/api-gateway
+    container_name: ecommerce-mvp-gateway
+    restart: unless-stopped
+    environment:
+      PORT: 3002
+      AUTH_SERVICE_URL: http://auth-service:3003
+      CUSTOMER_SERVICE_URL: http://customer-service:3004
+      PRODUCT_SERVICE_URL: http://product-service:3005
+      ORDER_SERVICE_URL: http://order-service:3007
+      SHIPMENT_SERVICE_URL: http://shipment-service:3006
+    ports:
+      - "3002:3002"
+    depends_on:
+      auth-service:
+        condition: service_started
+      customer-service:
+        condition: service_started
+      product-service:
+        condition: service_started
+      order-service:
+        condition: service_started
+      shipment-service:
+        condition: service_started
+
+# ==========================================
+# VOLUMES - Lưu dữ liệu bền vững
+# ==========================================
+volumes:
+  postgres_data:
+  mongodb_data:
+  redis_data:
+  kafka_data:
+
